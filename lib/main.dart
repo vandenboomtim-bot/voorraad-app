@@ -17,9 +17,35 @@ class VoorraadApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return const MaterialApp(
+    return MaterialApp(
       debugShowCheckedModeBanner: false,
-      home: VoorraadHome(),
+      theme: ThemeData(
+        scaffoldBackgroundColor: const Color(0xFFF4F6FA),
+      ),
+      home: const VoorraadHome(),
+    );
+  }
+}
+
+class _Item {
+  final String id;
+  final String name;
+  final int count;
+  final String category;
+
+  const _Item({
+    required this.id,
+    required this.name,
+    required this.count,
+    required this.category,
+  });
+
+  factory _Item.fromMap(Map<String, dynamic> map) {
+    return _Item(
+      id: map['id'].toString(),
+      name: (map['name'] ?? '').toString(),
+      count: (map['count'] ?? 0) as int,
+      category: (map['category'] ?? 'overig').toString(),
     );
   }
 }
@@ -34,94 +60,111 @@ class VoorraadHome extends StatefulWidget {
 class _VoorraadHomeState extends State<VoorraadHome> {
   final supabase = Supabase.instance.client;
 
-  List<Map<String, dynamic>> items = [];
-  final TextEditingController controller = TextEditingController();
+  final controller = TextEditingController();
+  final searchController = TextEditingController();
 
+  final List<_Item> _items = [];
   RealtimeChannel? channel;
+
+  String selectedFilter = 'alle';
 
   @override
   void initState() {
     super.initState();
-    loadItems();
-    subscribe();
+    _load();
+    _listen();
   }
 
   @override
   void dispose() {
     controller.dispose();
+    searchController.dispose();
     channel?.unsubscribe();
     super.dispose();
   }
 
   // ---------------- DATA ----------------
 
-  Future<void> loadItems() async {
+  Future<void> _load() async {
     final data = await supabase.from('items').select().order('name');
 
     if (!mounted) return;
 
     setState(() {
-      items = List<Map<String, dynamic>>.from(data);
+      _items
+        ..clear()
+        ..addAll((data as List).map((e) => _Item.fromMap(e)));
     });
   }
 
-  void subscribe() {
+  void _listen() {
     channel = supabase
         .channel('items')
         .onPostgresChanges(
           event: PostgresChangeEvent.all,
           schema: 'public',
           table: 'items',
-          callback: (_) => loadItems(),
+          callback: (_) => _load(),
         )
         .subscribe();
   }
 
   // ---------------- ACTIONS ----------------
 
-  Future<void> addItem(String name) async {
+  Future<void> add() async {
+    final name = controller.text.trim();
+    if (name.isEmpty) return;
+
+    controller.clear();
+
     await supabase.from('items').insert({
       'name': name,
       'count': 0,
-      'category': 'overig',
+      'category': selectedFilter == 'alle' ? 'overig' : selectedFilter,
     });
   }
 
-  Future<void> updateCount(String id, int count) async {
+  Future<void> update(String id, int count) async {
+    if (count < 0) return;
+
     await supabase.from('items').update({
       'count': count,
     }).eq('id', id);
   }
 
-  Future<void> deleteItem(String id) async {
+  Future<void> remove(String id) async {
     await supabase.from('items').delete().eq('id', id);
+  }
+
+  // ---------------- FILTER ----------------
+
+  List<_Item> get filtered {
+    final q = searchController.text.toLowerCase();
+
+    final list = _items.where((i) {
+      final matchCat =
+          selectedFilter == 'alle' || i.category == selectedFilter;
+
+      final matchSearch = i.name.toLowerCase().contains(q);
+
+      return matchCat && matchSearch;
+    }).toList();
+
+    list.sort((a, b) => a.count.compareTo(b.count));
+
+    return list;
   }
 
   // ---------------- UI ----------------
 
-  Color categoryColor(String category) {
-    switch (category) {
-      case 'eten':
-        return Colors.orange;
-      case 'drinken':
-        return Colors.blue;
-      case 'schoonmaak':
-        return Colors.green;
-      default:
-        return Colors.grey;
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFFF4F6FA),
-
       appBar: AppBar(
-        backgroundColor: Colors.white,
+        backgroundColor: Colors.transparent,
         elevation: 0,
         title: const Text(
-          "🧺 Voorraad Pro",
+          "🧺 Voorraad PRO",
           style: TextStyle(
             color: Colors.black,
             fontWeight: FontWeight.bold,
@@ -129,154 +172,186 @@ class _VoorraadHomeState extends State<VoorraadHome> {
         ),
       ),
 
-      floatingActionButton: FloatingActionButton(
-        backgroundColor: Colors.black,
-        child: const Icon(Icons.add),
-        onPressed: () {
-          showModalBottomSheet(
-            context: context,
-            builder: (context) {
-              return Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    TextField(
-                      controller: controller,
-                      decoration: const InputDecoration(
-                        hintText: "Nieuw product...",
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    ElevatedButton(
-                      onPressed: () {
-                        if (controller.text.trim().isEmpty) return;
+      body: Column(
+        children: [
+          _search(),
+          _categories(),
+          _input(),
 
-                        addItem(controller.text.trim());
-                        controller.clear();
-                        Navigator.pop(context);
-                        loadItems();
-                      },
-                      child: const Text("Toevoegen"),
-                    )
-                  ],
-                ),
-              );
-            },
-          );
-        },
+          Expanded(
+            child: filtered.isEmpty
+                ? const Center(child: Text("Geen items"))
+                : ListView.builder(
+                    padding: const EdgeInsets.all(12),
+                    itemCount: filtered.length,
+                    itemBuilder: (context, i) {
+                      final item = filtered[i];
+                      final low = item.count <= 1;
+
+                      return _animatedCard(item, low);
+                    },
+                  ),
+          ),
+        ],
       ),
+    );
+  }
 
-      body: items.isEmpty
-          ? const Center(child: Text("Geen items"))
-          : ListView.builder(
-              padding: const EdgeInsets.all(12),
-              itemCount: items.length,
-              itemBuilder: (context, index) {
-                final item = items[index];
+  // ---------------- ANIMATED CARD ----------------
 
-                final id = item['id'].toString();
-                final name = item['name'] ?? '';
-                final count = (item['count'] ?? 0) as int;
-                final category = item['category'] ?? 'overig';
-
-                final lowStock = count <= 1;
-                final color = categoryColor(category);
-
-                return Dismissible(
-                  key: Key(id),
-                  direction: DismissDirection.endToStart,
-                  onDismissed: (_) => deleteItem(id),
-                  background: Container(
-                    alignment: Alignment.centerRight,
-                    padding: const EdgeInsets.only(right: 20),
-                    color: Colors.red,
-                    child: const Icon(Icons.delete, color: Colors.white),
+  Widget _animatedCard(_Item item, bool low) {
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 250),
+      curve: Curves.easeOut,
+      child: Dismissible(
+        key: ValueKey(item.id),
+        direction: DismissDirection.endToStart,
+        background: Container(
+          margin: const EdgeInsets.only(bottom: 10),
+          padding: const EdgeInsets.only(right: 20),
+          alignment: Alignment.centerRight,
+          decoration: BoxDecoration(
+            color: Colors.red,
+            borderRadius: BorderRadius.circular(16),
+          ),
+          child: const Icon(Icons.delete, color: Colors.white),
+        ),
+        onDismissed: (_) => remove(item.id),
+        child: Container(
+          margin: const EdgeInsets.only(bottom: 10),
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(16),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.05),
+                blurRadius: 10,
+                offset: const Offset(0, 5),
+              )
+            ],
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    item.name,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w600,
+                      fontSize: 16,
+                    ),
                   ),
-                  child: Container(
-                    margin: const EdgeInsets.only(bottom: 12),
-                    padding: const EdgeInsets.all(14),
+                  const SizedBox(height: 6),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 10, vertical: 4),
                     decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(16),
-                      border: Border.all(
-                        color: lowStock
-                            ? Colors.red.shade100
-                            : Colors.transparent,
+                      color: low ? Colors.red : Colors.grey.shade200,
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: Text(
+                      "${item.count}",
+                      style: TextStyle(
+                        color: low ? Colors.white : Colors.black,
+                        fontWeight: FontWeight.bold,
                       ),
                     ),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Row(
-                          children: [
-                            Container(
-                              width: 10,
-                              height: 40,
-                              decoration: BoxDecoration(
-                                color: color,
-                                borderRadius: BorderRadius.circular(10),
-                              ),
-                            ),
-                            const SizedBox(width: 12),
-
-                            Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  name,
-                                  style: const TextStyle(
-                                    fontSize: 16,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                                const SizedBox(height: 6),
-                                Container(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 8,
-                                    vertical: 3,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    color: lowStock
-                                        ? Colors.red
-                                        : Colors.grey.shade200,
-                                    borderRadius: BorderRadius.circular(8),
-                                  ),
-                                  child: Text(
-                                    "$count",
-                                    style: TextStyle(
-                                      color: lowStock
-                                          ? Colors.white
-                                          : Colors.black,
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ],
-                        ),
-
-                        Row(
-                          children: [
-                            IconButton(
-                              icon: const Icon(Icons.remove),
-                              onPressed: () =>
-                                  updateCount(id, count - 1),
-                            ),
-                            IconButton(
-                              icon: const Icon(Icons.add),
-                              onPressed: () =>
-                                  updateCount(id, count + 1),
-                            ),
-                          ],
-                        )
-                      ],
-                    ),
                   ),
-                );
-              },
+                ],
+              ),
+
+              Row(
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.remove),
+                    onPressed: () => update(item.id, item.count - 1),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.add),
+                    onPressed: () => update(item.id, item.count + 1),
+                  ),
+                ],
+              )
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ---------------- OTHER UI ----------------
+
+  Widget _search() {
+    return Padding(
+      padding: const EdgeInsets.all(12),
+      child: TextField(
+        controller: searchController,
+        onChanged: (_) => setState(() {}),
+        decoration: InputDecoration(
+          hintText: "Zoek...",
+          filled: true,
+          fillColor: Colors.white,
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(14),
+            borderSide: BorderSide.none,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _categories() {
+    Widget chip(String c) {
+      final selected = selectedFilter == c;
+
+      return Padding(
+        padding: const EdgeInsets.only(right: 8),
+        child: ChoiceChip(
+          label: Text(c),
+          selected: selected,
+          onSelected: (_) => setState(() => selectedFilter = c),
+        ),
+      );
+    }
+
+    return SizedBox(
+      height: 40,
+      child: ListView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        children: [
+          chip('alle'),
+          chip('overig'),
+          chip('eten'),
+          chip('drinken'),
+          chip('schoonmaak'),
+        ],
+      ),
+    );
+  }
+
+  Widget _input() {
+    return Padding(
+      padding: const EdgeInsets.all(12),
+      child: Row(
+        children: [
+          Expanded(
+            child: TextField(
+              controller: controller,
+              decoration: const InputDecoration(
+                hintText: "Nieuw product...",
+              ),
             ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.add_circle, color: Colors.green),
+            onPressed: add,
+          )
+        ],
+      ),
     );
   }
 }
